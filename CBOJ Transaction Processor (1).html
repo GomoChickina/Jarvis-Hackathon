@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CBOJ Transaction Processor</title>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);
+--bg:#f6f7f9;--card:#fff;--tx:#1b1f24;--mut:#667085;--bd:#dfe3e8;--ac:#1f5fbf;--ok:#1a7f4b;--no:#c0392b;--fl:#b7791f}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#14171c;--card:#1d2127;--tx:#e8eaed;--mut:#9aa3af;--bd:#2f353d;--ac:#6ea2f0;--ok:#4cc38a;--no:#f0776a;--fl:#e2b254}}
+:root[data-theme="dark"]{--bg:#14171c;--card:#1d2127;--tx:#e8eaed;--mut:#9aa3af;--bd:#2f353d;--ac:#6ea2f0;--ok:#4cc38a;--no:#f0776a;--fl:#e2b254}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:980px;margin:0 auto;padding:20px 16px 40px}
+h1{font-size:22px;margin:0 0 2px}.sub{color:var(--mut);margin:0 0 16px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:14px;margin-bottom:14px}
+.row{display:flex;flex-wrap:wrap;gap:12px;align-items:end}
+label{display:flex;flex-direction:column;font-size:13px;color:var(--mut);gap:4px}
+input[type=number]{width:96px;padding:6px;border:1px solid var(--bd);border-radius:6px;background:var(--bg);color:var(--tx)}
+button{padding:8px 16px;border:0;border-radius:6px;background:var(--ac);color:#fff;font-size:14px;cursor:pointer}
+button.t{background:none;color:var(--tx);border:1px solid var(--bd)}button.t.on{background:var(--ac);color:#fff;border-color:var(--ac)}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:14px}
+.stat{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:12px}
+.stat b{display:block;font-size:26px}.stat span{color:var(--mut);font-size:13px}
+.wrap{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:14px}
+th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--bd);white-space:nowrap}th{color:var(--mut);font-weight:600}
+.b{padding:2px 8px;border-radius:99px;font-size:12px;font-weight:600;border:1px solid currentColor}
+.ok{color:var(--ok)}.no{color:var(--no)}.fl{color:var(--fl)}
+.tabs{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}.err{color:var(--no);margin-top:8px}.hide{display:none}
+.fc{border:1px solid var(--bd);border-left:4px solid var(--fl);border-radius:8px;padding:8px 12px;margin-bottom:8px}
+</style>
+</head>
+<body>
+<main>
+<h1>Canadian Bank of Jarvis</h1>
+<p class="sub">Transaction processing engine. Everything runs in your browser; no data is uploaded anywhere.</p>
+
+<div class="card">
+ <div class="row">
+  <label>Accounts CSV<input type="file" id="fa" accept=".csv"></label>
+  <label>Transactions CSV<input type="file" id="ft" accept=".csv"></label>
+  <button id="run">Process</button>
+ </div>
+ <div class="row" style="margin-top:12px">
+  <label>Large amount ≥ ($)<input type="number" id="cl" value="5000"></label>
+  <label>Frequency: count<input type="number" id="cc" value="5"></label>
+  <label>within (minutes)<input type="number" id="cw" value="10"></label>
+ </div>
+ <div class="err" id="err"></div>
+</div>
+
+<div id="out" class="hide">
+ <div class="stats" id="stats"></div>
+ <div class="tabs">
+  <button class="t on" data-v="all">All results</button><button class="t" data-v="approved">Approved</button>
+  <button class="t" data-v="rejected">Rejected</button><button class="t" data-v="flagged">Flagged</button>
+  <button class="t" data-v="bal">Balances</button>
+ </div>
+ <div class="card"><div class="wrap" id="view"></div></div>
+</div>
+</main>
+<script>
+//CORE-START
+const SUP=['PURCHASE','WITHDRAWAL','DEPOSIT','TRANSFER'];
+function parseCSV(text){
+  const rows=[];let row=[],f='',q=false;text=text.replace(/^\uFEFF/,'');
+  for(let i=0;i<text.length;i++){const c=text[i];
+    if(q){if(c==='"'){if(text[i+1]==='"'){f+='"';i++}else q=false}else f+=c}
+    else if(c==='"')q=true;else if(c===','){row.push(f);f=''}
+    else if(c==='\n'||c==='\r'){if(c==='\r'&&text[i+1]==='\n')i++;row.push(f);f='';if(row.some(x=>x!==''))rows.push(row);row=[]}
+    else f+=c}
+  if(f!==''||row.length){row.push(f);rows.push(row)}
+  const h=rows.shift().map(x=>x.trim());
+  return rows.map(r=>Object.fromEntries(h.map((k,i)=>[k,r[i]===undefined?'':r[i]])));
+}
+// money is kept as integer cents to avoid floating point errors
+function toC(s){s=String(s||'').trim();return /^-?\d+(\.\d+)?$/.test(s)?Math.round(parseFloat(s)*100):null}
+function fmt(c){return '$'+(c/100).toLocaleString('en-CA',{minimumFractionDigits:2,maximumFractionDigits:2})}
+function processAll(accRows,txRows,cfg){
+  const accts={};
+  accRows.forEach(r=>{const id=r.accountId.trim();accts[id]={id,name:r.customerName,status:r.status.trim().toUpperCase(),bal:toC(r.balance),limit:toC(r.dailyLimit)}});
+  const k=t=>{const v=Date.parse(t.timestamp);return isNaN(v)?Infinity:v};
+  const txs=[...txRows].sort((a,b)=>{const x=k(a),y=k(b);return x===y?0:x<y?-1:1});
+  const out=[],done=new Set(),daily={},recent={};
+  txs.forEach(t=>{
+    const id=(t.transactionId||'').trim(),type=(t.type||'').trim().toUpperCase();
+    const res={id,type,amount:(t.amount||'').trim(),ok:false,reason:'',flags:[]};
+    const rej=m=>{res.reason=m;out.push(res)};
+    if(!id)return rej('MISSING TRANSACTION ID');
+    const dup=done.has(id);done.add(id); // every handled ID counts, approved or rejected
+    if(!SUP.includes(type))return rej('UNSUPPORTED TRANSACTION TYPE ('+(type||'BLANK')+')');
+    const ts=Date.parse(t.timestamp);if(isNaN(ts))return rej('INVALID TIMESTAMP');
+    const sid=(t.fromAccount||'').trim(),did=(t.toAccount||'').trim();
+    const get=(a,role)=>{if(!a)return 'MISSING '+role+' ACCOUNT';const x=accts[a];if(!x)return 'INVALID ACCOUNT';
+      return x.status!=='ACTIVE'?'INACTIVE ACCOUNT ('+x.status+')':x};
+    let src=null,dst=null,e;
+    if(type!=='DEPOSIT'){e=get(sid,'SOURCE');if(typeof e==='string')return rej(e);src=e}
+    if(type==='DEPOSIT'||type==='TRANSFER'){e=get(did,'DESTINATION');if(typeof e==='string')return rej(e);dst=e}
+    const amt=toC(t.amount);
+    if(amt===null)return rej('INVALID AMOUNT (not a number)');
+    if(amt<=0)return rej('INVALID AMOUNT (must be > 0)');
+    if(dup)return rej('DUPLICATE TRANSACTION ID');
+    if(src&&src.bal-amt<0)return rej('INSUFFICIENT FUNDS');
+    if(src&&dst&&src===dst)return rej('SAME SOURCE AND DESTINATION ACCOUNT');
+    // valid: review rules (including this transaction)
+    const fl=[];
+    if(amt>=cfg.large)fl.push('LARGE AMOUNT (≥ '+fmt(cfg.large)+')');
+    if(src){const dk=src.id+'|'+t.timestamp.trim().slice(0,10),p=(daily[dk]||0)+amt;
+      if(p>src.limit)fl.push('DAILY LIMIT EXCEEDED ('+fmt(p)+' > '+fmt(src.limit)+')')}
+    [src,dst].filter(Boolean).forEach(a=>{const w=recent[a.id]=recent[a.id]||[];
+      while(w.length&&ts-w[0]>cfg.win*60000)w.shift();
+      if(w.length+1>=cfg.cnt)fl.push('HIGH FREQUENCY ('+(w.length+1)+' in '+cfg.win+' min on '+a.id+')')});
+    // apply
+    if(src){src.bal-=amt;const dk=src.id+'|'+t.timestamp.trim().slice(0,10);daily[dk]=(daily[dk]||0)+amt}
+    if(dst)dst.bal+=amt;
+    [src,dst].filter(Boolean).forEach(a=>recent[a.id].push(ts));
+    res.ok=true;res.flags=fl;out.push(res);
+  });
+  const ap=out.filter(r=>r.ok).length;
+  return{out,accts:Object.values(accts),sum:{total:out.length,ap,rj:out.length-ap,fl:out.filter(r=>r.ok&&r.flags.length).length}};
+}
+//CORE-END
+const $=id=>document.getElementById(id);
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let R=null,view='all';
+function render(){
+  if(!R)return;
+  const s=R.sum;
+  $('stats').innerHTML=[['Processed',s.total,''],['Approved',s.ap,'ok'],['Rejected',s.rj,'no'],['Flagged for review',s.fl,'fl']]
+    .map(x=>`<div class="stat"><b class="${x[2]}">${x[1]}</b><span>${x[0]}</span></div>`).join('');
+  let h='';
+  if(view==='bal'){
+    h='<table><tr><th>Account</th><th>Customer</th><th>Status</th><th>Balance</th></tr>'+
+      R.accts.map(a=>`<tr><td>${esc(a.id)}</td><td>${esc(a.name)}</td><td>${esc(a.status)}</td><td>${fmt(a.bal)}</td></tr>`).join('')+'</table>';
+  }else if(view==='flagged'){
+    const f=R.out.filter(r=>r.ok&&r.flags.length);
+    h=f.length?f.map(r=>`<div class="fc"><b>${esc(r.id)}</b> · ${esc(r.type)} · ${esc(r.amount)}<br>${r.flags.map(x=>'• '+esc(x)).join('<br>')}</div>`).join(''):'No flagged transactions.';
+  }else{
+    const rows=R.out.filter(r=>view==='all'||(view==='approved'&&r.ok)||(view==='rejected'&&!r.ok));
+    h='<table><tr><th>ID</th><th>Type</th><th>Amount</th><th>Result</th><th>Detail</th></tr>'+rows.map(r=>{
+      const st=r.ok?'<span class="b ok">APPROVED</span>':'<span class="b no">REJECTED</span>';
+      const d=r.ok?(r.flags.length?'<span class="fl">⚑ '+esc(r.flags.join('; '))+'</span>':''):esc(r.reason);
+      return `<tr><td>${esc(r.id)}</td><td>${esc(r.type)}</td><td>${esc(r.amount)}</td><td>${st}</td><td>${d}</td></tr>`}).join('')+'</table>';
+  }
+  $('view').innerHTML=h;
+}
+document.querySelectorAll('.tabs .t').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('.tabs .t').forEach(x=>x.classList.remove('on'));b.classList.add('on');view=b.dataset.v;render()});
+$('run').onclick=async()=>{
+  $('err').textContent='';
+  const fa=$('fa').files[0],ft=$('ft').files[0];
+  if(!fa||!ft){$('err').textContent='Please choose both CSV files first.';return}
+  try{
+    const cfg={large:Math.round(parseFloat($('cl').value)*100),cnt:parseInt($('cc').value),win:parseFloat($('cw').value)};
+    R=processAll(parseCSV(await fa.text()),parseCSV(await ft.text()),cfg);
+    $('out').classList.remove('hide');render();
+  }catch(e){$('err').textContent='Could not read the files: '+e.message}
+};
+</script>
+</body>
+</html>
